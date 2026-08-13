@@ -1,0 +1,106 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# Voicebox — Railway Deployment
+# 3-stage build: Frontend -> Python deps -> Runtime
+#
+# Optimised for Railway (no GPU, uses $PORT env var,
+# lightweight /healthz health check).
+# ============================================================
+
+# Top-level ARG so it is visible to all stages.
+ARG PYTORCH_VARIANT=cpu
+
+# === Stage 1: Build frontend ===
+FROM oven/bun:1 AS frontend
+
+WORKDIR /build
+
+# Copy workspace config and frontend source
+COPY package.json bun.lock CHANGELOG.md ./
+COPY app/ ./app/
+COPY web/ ./web/
+
+# Normalize line endings first (a Windows CRLF checkout would otherwise
+# defeat the `-z 's/,\n  ]/…/'` match below, since it's LF-anchored), then
+# strip workspaces not needed for web build, and fix trailing comma
+RUN sed -i 's/\r$//' package.json && \
+    sed -i '/"tauri"/d; /"landing"/d' package.json && \
+    sed -i -z 's/,\n  ]/\n  ]/' package.json
+RUN bun install --no-save
+# Build frontend (skip tsc -- upstream has pre-existing type errors)
+RUN cd web && bunx --bun vite build
+
+
+# === Stage 2: Build Python dependencies ===
+FROM python:3.11-slim AS backend-builder
+
+# Re-declare ARG inside the stage (Docker scoping requirement).
+ARG PYTORCH_VARIANT=cpu
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip
+
+COPY backend/requirements.txt .
+
+# Railway is CPU-only; install CPU PyTorch wheels directly.
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install --no-deps chatterbox-tts
+RUN pip install --no-cache-dir --prefix=/install --no-deps hume-tada
+RUN pip install --no-cache-dir --prefix=/install \
+    git+https://github.com/QwenLM/Qwen3-TTS.git
+
+
+# === Stage 3: Runtime ===
+FROM python:3.11-slim
+
+# Create non-root user
+RUN groupadd -r voicebox && \
+    useradd -r -g voicebox -m -s /bin/bash voicebox
+
+WORKDIR /app
+
+# Install only runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed Python packages from builder stage
+COPY --from=backend-builder /install /usr/local
+
+# Copy backend application code
+COPY --chown=voicebox:voicebox backend/ /app/backend/
+
+# Copy built frontend from frontend stage
+COPY --from=frontend --chown=voicebox:voicebox /build/web/dist /app/frontend/
+
+# Create data directories owned by non-root user
+RUN mkdir -p /app/data/generations /app/data/profiles /app/data/cache \
+    && chown -R voicebox:voicebox /app/data
+
+# Expose the default API port (Railway overrides via $PORT)
+EXPOSE 17493
+
+# Health check for local `docker run` only.  Railway ignores this instruction
+# and uses healthcheckPath / healthcheckTimeout from railway.toml instead.
+# Start period aligned to railway.toml's healthcheckTimeout (300s) so local
+# testing mirrors Railway behavior during first-boot model downloads.
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=300s \
+    CMD curl -f http://localhost:${PORT:-17493}/healthz || exit 1
+
+# Railway entrypoint: no GPU detection needed, just drop to non-root user
+COPY --chmod=755 <<'EOF' /usr/local/bin/entrypoint.sh
+#!/bin/sh
+set -e
+exec gosu voicebox "$@"
+EOF
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["sh", "-c", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-17493}"]
