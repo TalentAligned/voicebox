@@ -17,6 +17,17 @@ from ..utils.platform_detect import get_backend_type, is_amd_gpu_windows
 
 router = APIRouter()
 
+
+@router.get("/healthz")
+async def healthz():
+    """Lightweight health check for Railway and container orchestrators.
+
+    Returns immediately without importing torch, scanning models, or
+    performing any heavy work.  Use /health for full diagnostics.
+    """
+    return {"status": "ok"}
+
+
 # Frontend build directory — present in Docker, absent in dev/API-only mode
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
 
