@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ============================================================
 # Voicebox — Railway Deployment
 # 3-stage build: Frontend -> Python deps -> Runtime
@@ -87,9 +88,11 @@ RUN mkdir -p /app/data/generations /app/data/profiles /app/data/cache \
 # Expose the default API port (Railway overrides via $PORT)
 EXPOSE 17493
 
-# Health check - uses the lightweight /healthz endpoint
-# Start period is generous to allow model downloads on first run
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
+# Health check for local `docker run` only.  Railway ignores this instruction
+# and uses healthcheckPath / healthcheckTimeout from railway.toml instead.
+# Start period aligned to railway.toml's healthcheckTimeout (300s) so local
+# testing mirrors Railway behavior during first-boot model downloads.
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=300s \
     CMD curl -f http://localhost:${PORT:-17493}/healthz || exit 1
 
 # Railway entrypoint: no GPU detection needed, just drop to non-root user

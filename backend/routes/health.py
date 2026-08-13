@@ -22,8 +22,10 @@ router = APIRouter()
 async def healthz():
     """Lightweight health check for Railway and container orchestrators.
 
-    Returns immediately without importing torch, scanning models, or
-    performing any heavy work.  Use /health for full diagnostics.
+    Returns immediately without calling torch, scanning models, or
+    performing any heavy work at request time.  Note: this module does
+    import torch at the top level (loaded once at app startup), but
+    this endpoint itself does no ML work.  Use /health for full diagnostics.
     """
     return {"status": "ok"}
 
